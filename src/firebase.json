@@ -1,0 +1,13 @@
+{
+  "hosting": {
+    "public": "lc-tracker/build",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ]
+  },
+  "storage": {
+    "rules": "storage.rules"
+  }
+}
