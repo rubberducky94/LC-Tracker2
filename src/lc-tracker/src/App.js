@@ -1,11 +1,26 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, Navigate } from 'react-router-dom';
 import './App.css';
 import 'chart.js/auto';
 import { Bar } from 'react-chartjs-2';
 
-// Dashboard: Entry logging form
-// LocalStorage helpers (zero-dollar backend for now)
+import { auth, db } from './firebase';
+import {
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signOut as fbSignOut,
+} from 'firebase/auth';
+import {
+  collection,
+  addDoc,
+  getDocs,
+  query,
+  orderBy,
+  serverTimestamp,
+} from 'firebase/firestore';
+
+// LocalStorage helpers (kept for fallback / export/import)
 function loadJSON(key, fallback) {
   try {
     const v = localStorage.getItem(key);
@@ -19,10 +34,54 @@ function saveJSON(key, value) {
   localStorage.setItem(key, JSON.stringify(value));
 }
 
-function Dashboard({ onLogout }) {
+function Auth() {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [mode, setMode] = useState('login'); // 'login' or 'signup'
+  const [error, setError] = useState('');
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError('');
+    try {
+      if (mode === 'login') {
+        await signInWithEmailAndPassword(auth, email, password);
+      } else {
+        await createUserWithEmailAndPassword(auth, email, password);
+      }
+      setEmail('');
+      setPassword('');
+    } catch (err) {
+      setError(err.message || 'Auth failed');
+    }
+  };
+
+  return (
+    <div style={{ maxWidth: 420, margin: '2rem auto' }}>
+      <h3>{mode === 'login' ? 'Login' : 'Sign up'}</h3>
+      <form onSubmit={handleSubmit}>
+        <label>Email</label>
+        <input type="email" value={email} onChange={e => setEmail(e.target.value)} required />
+        <label>Password</label>
+        <input type="password" value={password} onChange={e => setPassword(e.target.value)} required />
+        <div style={{ marginTop: 12 }}>
+          <button type="submit">{mode === 'login' ? 'Login' : 'Create account'}</button>{' '}
+          <button type="button" onClick={() => setMode(mode === 'login' ? 'signup' : 'login')}>
+            {mode === 'login' ? 'Switch to Sign up' : 'Switch to Login'}
+          </button>
+        </div>
+      </form>
+      {error && <p style={{ color: 'red' }}>{error}</p>}
+      <p style={{ marginTop: 8 }}>
+        Tip: create an account to store data per-user (or continue without signing in below).
+      </p>
+    </div>
+  );
+}
+
+function Dashboard({ user }) {
   const [students, setStudents] = useState([]);
   const [zones, setZones] = useState([]);
-  // Use local time for today
   function getLocalDateString() {
     const now = new Date();
     const year = now.getFullYear();
@@ -30,7 +89,6 @@ function Dashboard({ onLogout }) {
     const day = String(now.getDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
   }
-  // default date is today but editable
   const [date, setDate] = useState(getLocalDateString());
   const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   const selectedDay = (() => {
@@ -40,20 +98,36 @@ function Dashboard({ onLogout }) {
       return dayNames[new Date().getDay()];
     }
   })();
-
   const [period, setPeriod] = useState('');
   const [entries, setEntries] = useState({});
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
 
-  // Load students and zones for dropdowns
-  React.useEffect(() => {
-    // load from localStorage
-    setStudents(loadJSON('lc_students', []));
-    setZones(loadJSON('lc_zones', []));
-  }, []);
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      if (user?.uid) {
+        try {
+          const stuQ = query(collection(db, 'users', user.uid, 'students'), orderBy('name'));
+          const znQ = query(collection(db, 'users', user.uid, 'zones'), orderBy('name'));
+          const [stuSnap, znSnap] = await Promise.all([getDocs(stuQ), getDocs(znQ)]);
+          if (!mounted) return;
+          setStudents(stuSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+          setZones(znSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+        } catch (e) {
+          setError('Failed to load server data, falling back to local');
+          setStudents(loadJSON('lc_students', []));
+          setZones(loadJSON('lc_zones', []));
+        }
+      } else {
+        setStudents(loadJSON('lc_students', []));
+        setZones(loadJSON('lc_zones', []));
+      }
+    };
+    load();
+    return () => { mounted = false; };
+  }, [user]);
 
-  // Handle entry field change for a student
   const handleEntryChange = (studentId, field, value) => {
     setEntries(prev => ({
       ...prev,
@@ -64,43 +138,69 @@ function Dashboard({ onLogout }) {
     }));
   };
 
-  // Submit all entries for the selected day/period
-  const handleSubmit = e => {
+  const handleSubmit = async e => {
     e.preventDefault();
     setMessage('');
     setError('');
     try {
       const now = new Date().toISOString();
-      const saved = loadJSON('lc_entries', []);
       let added = 0;
-      students.forEach((student, idx) => {
-        const entry = entries[student.id];
-        if (!entry || !entry.type || !entry.zone_id || !entry.action) return;
-        const obj = {
-          id: `${Date.now()}-${idx}`,
-          day: selectedDay,
-          date,
-          period,
-          student_id: student.id,
-          type: entry.type,
-          zone_id: entry.zone_id,
-          zone_detail: entry.zone_detail || '',
-          action: entry.action,
-          notes: entry.notes || '',
-          timestamp: now,
-        };
-        saved.push(obj);
-        added += 1;
-      });
-      saveJSON('lc_entries', saved);
+
+      if (user?.uid) {
+        const colRef = collection(db, 'users', user.uid, 'entries');
+        const promises = [];
+        students.forEach((student, idx) => {
+          const entry = entries[student.id];
+          if (!entry || !entry.type || !entry.zone_id || !entry.action) return;
+          const obj = {
+            day: selectedDay,
+            date,
+            period,
+            student_id: student.id,
+            type: entry.type,
+            zone_id: entry.zone_id,
+            zone_detail: entry.zone_detail || '',
+            action: entry.action,
+            notes: entry.notes || '',
+            createdAt: serverTimestamp(),
+            client_ts: now,
+          };
+          promises.push(addDoc(colRef, obj));
+          added += 1;
+        });
+        await Promise.all(promises);
+      } else {
+        const saved = loadJSON('lc_entries', []);
+        students.forEach((student, idx) => {
+          const entry = entries[student.id];
+          if (!entry || !entry.type || !entry.zone_id || !entry.action) return;
+          const obj = {
+            id: `${Date.now()}-${idx}`,
+            day: selectedDay,
+            date,
+            period,
+            student_id: student.id,
+            type: entry.type,
+            zone_id: entry.zone_id,
+            zone_detail: entry.zone_detail || '',
+            action: entry.action,
+            notes: entry.notes || '',
+            timestamp: now,
+          };
+          saved.push(obj);
+          added += 1;
+        });
+        saveJSON('lc_entries', saved);
+      }
+
       if (added > 0) {
-        setMessage('Entries saved locally!');
+        setMessage('Entries saved!');
         setEntries({});
       } else {
         setError('No entries were logged. Please fill out at least one student.');
       }
     } catch (e) {
-      setError('Save failed');
+      setError('Save failed: ' + (e.message || e));
     }
   };
 
@@ -224,39 +324,53 @@ function Dashboard({ onLogout }) {
   );
 }
 
-// Data: Table view of all entries
-function Data() {
+function Data({ user }) {
   const [entries, setEntries] = useState([]);
   const [students, setStudents] = useState([]);
   const [zones, setZones] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  React.useEffect(() => {
-    setLoading(true);
-    try {
-      setEntries(loadJSON('lc_entries', []));
-      setStudents(loadJSON('lc_students', []));
-      setZones(loadJSON('lc_zones', []));
-      setLoading(false);
-    } catch (e) {
-      setError('Failed to load data');
-      setLoading(false);
-    }
-  }, []);
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      setLoading(true);
+      try {
+        if (user?.uid) {
+          const eQ = query(collection(db, 'users', user.uid, 'entries'), orderBy('date', 'desc'));
+          const [eSnap, sSnap, zSnap] = await Promise.all([
+            getDocs(eQ),
+            getDocs(query(collection(db, 'users', user.uid, 'students'))),
+            getDocs(query(collection(db, 'users', user.uid, 'zones'))),
+          ]);
+          if (!mounted) return;
+          setEntries(eSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+          setStudents(sSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+          setZones(zSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+        } else {
+          setEntries(loadJSON('lc_entries', []));
+          setStudents(loadJSON('lc_students', []));
+          setZones(loadJSON('lc_zones', []));
+        }
+        setLoading(false);
+      } catch (e) {
+        setError('Failed to load data: ' + (e.message || e));
+        setLoading(false);
+      }
+    };
+    load();
+    return () => { mounted = false; };
+  }, [user]);
 
   const getStudentName = id => students.find(s => s.id === id)?.name || id;
   const getZoneName = id => zones.find(z => z.id === id)?.name || id;
+  const formatLocal = ts => ts ? new Date(ts.seconds ? ts.toDate() : ts).toLocaleString(undefined, { timeZoneName: 'short' }) : '';
 
-  // Format timestamp in user's local time zone
-  const formatLocal = ts => ts ? new Date(ts).toLocaleString(undefined, { timeZoneName: 'short' }) : '';
-
-  // Export current data as JSON file
   const handleExport = () => {
     const payload = {
-      entries: loadJSON('lc_entries', []),
-      students: loadJSON('lc_students', []),
-      zones: loadJSON('lc_zones', []),
+      entries,
+      students,
+      zones,
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -267,7 +381,6 @@ function Data() {
     URL.revokeObjectURL(url);
   };
 
-  // Import JSON file: accepts object with entries/students/zones or an array (assumed entries)
   const handleImportFile = async (files) => {
     const file = files?.[0];
     if (!file) return;
@@ -283,7 +396,6 @@ function Data() {
       } else {
         throw new Error('Unsupported import format');
       }
-      // reload
       setEntries(loadJSON('lc_entries', []));
       setStudents(loadJSON('lc_students', []));
       setZones(loadJSON('lc_zones', []));
@@ -293,7 +405,6 @@ function Data() {
     }
   };
 
-  // Build simple chart: action counts
   const actionCounts = entries.reduce((acc, e) => {
     if (!e || !e.action) return acc;
     acc[e.action] = (acc[e.action] || 0) + 1;
@@ -365,7 +476,7 @@ function Data() {
                     <td>{e.zone_detail}</td>
                     <td>{e.action}</td>
                     <td>{e.notes}</td>
-                    <td>{formatLocal(e.timestamp)}</td>
+                    <td>{formatLocal(e.createdAt || e.timestamp || e.client_ts)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -377,8 +488,7 @@ function Data() {
   );
 }
 
-// Manage: Students and Zones (unchanged)
-function Manage() {
+function Manage({ user }) {
   const [students, setStudents] = useState([]);
   const [zones, setZones] = useState([]);
   const [newStudent, setNewStudent] = useState('');
@@ -387,24 +497,48 @@ function Manage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  React.useEffect(() => {
-    setLoading(true);
-    setStudents(loadJSON('lc_students', []));
-    setZones(loadJSON('lc_zones', []));
-    setLoading(false);
-  }, []);
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      setLoading(true);
+      try {
+        if (user?.uid) {
+          const sSnap = await getDocs(query(collection(db, 'users', user.uid, 'students'), orderBy('name')));
+          const zSnap = await getDocs(query(collection(db, 'users', user.uid, 'zones'), orderBy('name')));
+          if (!mounted) return;
+          setStudents(sSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+          setZones(zSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+        } else {
+          setStudents(loadJSON('lc_students', []));
+          setZones(loadJSON('lc_zones', []));
+        }
+        setLoading(false);
+      } catch (e) {
+        setError('Failed to load: ' + (e.message || e));
+        setLoading(false);
+      }
+    };
+    load();
+    return () => { mounted = false; };
+  }, [user]);
 
   const handleAddStudent = async (e) => {
     e.preventDefault();
     setError('');
     try {
-      const obj = { id: `${Date.now()}`, name: newStudent };
-      const updated = [...students, obj];
-      setStudents(updated);
-      saveJSON('lc_students', updated);
+      const obj = { name: newStudent };
+      if (user?.uid) {
+        await addDoc(collection(db, 'users', user.uid, 'students'), obj);
+        const sSnap = await getDocs(query(collection(db, 'users', user.uid, 'students'), orderBy('name')));
+        setStudents(sSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+      } else {
+        const saved = [...students, { id: `${Date.now()}`, ...obj }];
+        setStudents(saved);
+        saveJSON('lc_students', saved);
+      }
       setNewStudent('');
     } catch (e) {
-      setError('Save failed');
+      setError('Save failed: ' + (e.message || e));
     }
   };
 
@@ -412,14 +546,20 @@ function Manage() {
     e.preventDefault();
     setError('');
     try {
-      const obj = { id: `${Date.now()}`, name: newZone, category: zoneCategory };
-      const updated = [...zones, obj];
-      setZones(updated);
-      saveJSON('lc_zones', updated);
+      const obj = { name: newZone, category: zoneCategory };
+      if (user?.uid) {
+        await addDoc(collection(db, 'users', user.uid, 'zones'), obj);
+        const zSnap = await getDocs(query(collection(db, 'users', user.uid, 'zones'), orderBy('name')));
+        setZones(zSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+      } else {
+        const saved = [...zones, { id: `${Date.now()}`, ...obj }];
+        setZones(saved);
+        saveJSON('lc_zones', saved);
+      }
       setNewZone('');
       setZoneCategory('');
     } catch (e) {
-      setError('Save failed');
+      setError('Save failed: ' + (e.message || e));
     }
   };
 
@@ -469,12 +609,52 @@ function Manage() {
 }
 
 function App() {
+  const [user, setUser] = useState(null);
+  const [skipAuth, setSkipAuth] = useState(false);
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+    });
+    return () => unsub();
+  }, []);
+
+  const handleSignOut = async () => {
+    try {
+      await fbSignOut(auth);
+      setUser(null);
+    } catch (e) {
+      console.error('Sign out failed', e);
+    }
+  };
+
+  if (!user && !skipAuth) {
+    return (
+      <div>
+        <Auth />
+        <div style={{ textAlign: 'center', marginTop: 12 }}>
+          <button onClick={() => setSkipAuth(true)}>Continue without signing in</button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <Router>
+      <div style={{ textAlign: 'right', padding: '0.5rem 1rem' }}>
+        {user ? (
+          <>
+            <span style={{ marginRight: 12 }}>{user.email}</span>
+            <button onClick={handleSignOut}>Sign out</button>
+          </>
+        ) : (
+          <span style={{ marginRight: 12 }}>Using local mode</span>
+        )}
+      </div>
       <Routes>
-        <Route path="/" element={<Dashboard />} />
-        <Route path="/manage" element={<Manage />} />
-        <Route path="/data" element={<Data />} />
+        <Route path="/" element={<Dashboard user={user} />} />
+        <Route path="/manage" element={<Manage user={user} />} />
+        <Route path="/data" element={<Data user={user} />} />
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>
     </Router>
