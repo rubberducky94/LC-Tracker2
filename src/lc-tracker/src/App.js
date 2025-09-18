@@ -3,7 +3,21 @@ import { BrowserRouter as Router, Routes, Route, Link, Navigate } from 'react-ro
 import './App.css';
 
 // Dashboard: Entry logging form
-function Dashboard({ onLogout, token }) {
+// LocalStorage helpers (zero-dollar backend for now)
+function loadJSON(key, fallback) {
+  try {
+    const v = localStorage.getItem(key);
+    return v ? JSON.parse(v) : fallback;
+  } catch (e) {
+    return fallback;
+  }
+}
+
+function saveJSON(key, value) {
+  localStorage.setItem(key, JSON.stringify(value));
+}
+
+function Dashboard({ onLogout }) {
   const [students, setStudents] = useState([]);
   const [zones, setZones] = useState([]);
   // Use local time for today
@@ -24,15 +38,10 @@ function Dashboard({ onLogout, token }) {
 
   // Load students and zones for dropdowns
   React.useEffect(() => {
-    if (!token) return;
-    Promise.all([
-      fetch('/api/students', { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json()),
-      fetch('/api/zones', { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json())
-    ]).then(([studentsData, zonesData]) => {
-      setStudents(studentsData);
-      setZones(zonesData);
-    });
-  }, [token]);
+    // load from localStorage
+    setStudents(loadJSON('lc_students', []));
+    setZones(loadJSON('lc_zones', []));
+  }, []);
 
   // Handle entry field change for a student
   const handleEntryChange = (studentId, field, value) => {
@@ -46,45 +55,42 @@ function Dashboard({ onLogout, token }) {
   };
 
   // Submit all entries for the selected day/period
-  const handleSubmit = async e => {
+  const handleSubmit = e => {
     e.preventDefault();
     setMessage('');
     setError('');
     try {
-      const results = await Promise.all(
-        students.map(async student => {
-          const entry = entries[student.id];
-          if (!entry || !entry.type || !entry.zone_id || !entry.action) return null;
-          const res = await fetch('/api/entries', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${token}`,
-            },
-            body: JSON.stringify({
-              day: todayDay,
-              date: today,
-              period,
-              student_id: student.id,
-              type: entry.type,
-              zone_id: entry.zone_id,
-              zone_detail: entry.zone_detail || '',
-              action: entry.action,
-              notes: entry.notes || '',
-              // timestamp will be set by backend as UTC
-            }),
-          });
-          return res.ok;
-        })
-      );
-      if (results.some(r => r)) {
-        setMessage('Entries logged!');
+      const now = new Date().toISOString();
+      const saved = loadJSON('lc_entries', []);
+      let added = 0;
+      students.forEach((student, idx) => {
+        const entry = entries[student.id];
+        if (!entry || !entry.type || !entry.zone_id || !entry.action) return;
+        const obj = {
+          id: `${Date.now()}-${idx}`,
+          day: todayDay,
+          date: today,
+          period,
+          student_id: student.id,
+          type: entry.type,
+          zone_id: entry.zone_id,
+          zone_detail: entry.zone_detail || '',
+          action: entry.action,
+          notes: entry.notes || '',
+          timestamp: now,
+        };
+        saved.push(obj);
+        added += 1;
+      });
+      saveJSON('lc_entries', saved);
+      if (added > 0) {
+        setMessage('Entries saved locally!');
         setEntries({});
       } else {
         setError('No entries were logged. Please fill out at least one student.');
       }
-    } catch {
-      setError('Network error');
+    } catch (e) {
+      setError('Save failed');
     }
   };
 
@@ -93,8 +99,7 @@ function Dashboard({ onLogout, token }) {
       <h2>LC Tracker - Log Entries</h2>
       <nav>
         <Link to="/manage">Manage Students/Zones</Link> |{' '}
-        <Link to="/data">View Data</Link> |{' '}
-        <button onClick={onLogout}>Logout</button>
+        <Link to="/data">View Data</Link>
       </nav>
       <hr />
       <form onSubmit={handleSubmit} style={{ maxWidth: '100%', margin: '0 auto', textAlign: 'left' }}>
@@ -197,7 +202,7 @@ function Dashboard({ onLogout, token }) {
           </table>
         </div>
         <br />
-        <button type="submit">Log Entries</button>
+        <button type="submit">Save Entries</button>
       </form>
       {message && <p style={{ color: 'green' }}>{message}</p>}
       {error && <p style={{ color: 'red' }}>{error}</p>}
@@ -206,7 +211,7 @@ function Dashboard({ onLogout, token }) {
 }
 
 // Data: Table view of all entries
-function Data({ token }) {
+function Data() {
   const [entries, setEntries] = useState([]);
   const [students, setStudents] = useState([]);
   const [zones, setZones] = useState([]);
@@ -215,22 +220,16 @@ function Data({ token }) {
 
   React.useEffect(() => {
     setLoading(true);
-    Promise.all([
-      fetch('/api/entries', { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json()),
-      fetch('/api/students', { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json()),
-      fetch('/api/zones', { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json())
-    ])
-      .then(([entriesData, studentsData, zonesData]) => {
-        setEntries(entriesData);
-        setStudents(studentsData);
-        setZones(zonesData);
-        setLoading(false);
-      })
-      .catch(() => {
-        setError('Failed to load data');
-        setLoading(false);
-      });
-  }, [token]);
+    try {
+      setEntries(loadJSON('lc_entries', []));
+      setStudents(loadJSON('lc_students', []));
+      setZones(loadJSON('lc_zones', []));
+      setLoading(false);
+    } catch (e) {
+      setError('Failed to load data');
+      setLoading(false);
+    }
+  }, []);
 
   const getStudentName = id => students.find(s => s.id === id)?.name || id;
   const getZoneName = id => zones.find(z => z.id === id)?.name || id;
@@ -291,7 +290,7 @@ function Data({ token }) {
 }
 
 // Manage: Students and Zones (unchanged)
-function Manage({ token }) {
+function Manage() {
   const [students, setStudents] = useState([]);
   const [zones, setZones] = useState([]);
   const [newStudent, setNewStudent] = useState('');
@@ -301,41 +300,23 @@ function Manage({ token }) {
   const [loading, setLoading] = useState(false);
 
   React.useEffect(() => {
-    if (!token) return;
     setLoading(true);
-    Promise.all([
-      fetch('/api/students', { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json()),
-      fetch('/api/zones', { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json())
-    ])
-      .then(([studentsData, zonesData]) => {
-        setStudents(studentsData);
-        setZones(zonesData);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, [token]);
+    setStudents(loadJSON('lc_students', []));
+    setZones(loadJSON('lc_zones', []));
+    setLoading(false);
+  }, []);
 
   const handleAddStudent = async (e) => {
     e.preventDefault();
     setError('');
     try {
-      const res = await fetch('/api/students', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ name: newStudent }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setStudents([...students, data]);
-        setNewStudent('');
-      } else {
-        setError(data.error || 'Could not add student');
-      }
-    } catch {
-      setError('Network error');
+      const obj = { id: `${Date.now()}`, name: newStudent };
+      const updated = [...students, obj];
+      setStudents(updated);
+      saveJSON('lc_students', updated);
+      setNewStudent('');
+    } catch (e) {
+      setError('Save failed');
     }
   };
 
@@ -343,24 +324,14 @@ function Manage({ token }) {
     e.preventDefault();
     setError('');
     try {
-      const res = await fetch('/api/zones', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ name: newZone, category: zoneCategory }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setZones([...zones, data]);
-        setNewZone('');
-        setZoneCategory('');
-      } else {
-        setError(data.error || 'Could not add zone');
-      }
-    } catch {
-      setError('Network error');
+      const obj = { id: `${Date.now()}`, name: newZone, category: zoneCategory };
+      const updated = [...zones, obj];
+      setZones(updated);
+      saveJSON('lc_zones', updated);
+      setNewZone('');
+      setZoneCategory('');
+    } catch (e) {
+      setError('Save failed');
     }
   };
 
@@ -409,116 +380,13 @@ function Manage({ token }) {
   );
 }
 
-// Auth (unchanged)
-function Auth({ onAuth, showRegister, setShowRegister }) {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [schoolName, setSchoolName] = useState('');
-  const [error, setError] = useState('');
-
-  const handleLogin = async (e) => {
-    e.preventDefault();
-    setError('');
-    try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        onAuth(data.token);
-      } else {
-        setError(data.error || 'Login failed');
-      }
-    } catch {
-      setError('Network error');
-    }
-  };
-
-  const handleRegister = async (e) => {
-    e.preventDefault();
-    setError('');
-    try {
-      const res = await fetch('/api/auth/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password, school_name: schoolName }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        onAuth(data.token);
-      } else {
-        setError(data.error || 'Registration failed');
-      }
-    } catch {
-      setError('Network error');
-    }
-  };
-
-  return (
-    <div className="App">
-      <h2>LC Tracker {showRegister ? 'Registration' : 'Login'}</h2>
-      <form onSubmit={showRegister ? handleRegister : handleLogin}>
-        <input
-          type="email"
-          placeholder="School Email"
-          value={email}
-          onChange={e => setEmail(e.target.value)}
-          required
-        /><br />
-        <input
-          type="password"
-          placeholder="Password"
-          value={password}
-          onChange={e => setPassword(e.target.value)}
-          required
-        /><br />
-        {showRegister && (
-          <>
-            <input
-              type="text"
-              placeholder="School Name"
-              value={schoolName}
-              onChange={e => setSchoolName(e.target.value)}
-              required
-            /><br />
-          </>
-        )}
-        <button type="submit">{showRegister ? 'Register' : 'Login'}</button>
-      </form>
-      <button onClick={() => { setShowRegister(!showRegister); setError(''); }}>
-        {showRegister ? 'Back to Login' : 'Register School'}
-      </button>
-      {error && <p style={{ color: 'red' }}>{error}</p>}
-    </div>
-  );
-}
-
 function App() {
-  const [token, setToken] = useState(localStorage.getItem('token') || '');
-  const [showRegister, setShowRegister] = useState(false);
-
-  const handleAuth = (token) => {
-    setToken(token);
-    localStorage.setItem('token', token);
-  };
-
-  const handleLogout = () => {
-    setToken('');
-    localStorage.removeItem('token');
-  };
-
-  if (!token) {
-    return <Auth onAuth={handleAuth} showRegister={showRegister} setShowRegister={setShowRegister} />;
-  }
-
   return (
     <Router>
       <Routes>
-        <Route path="/" element={<Dashboard onLogout={handleLogout} token={token} />} />
-        <Route path="/manage" element={<Manage token={token} />} />
-        <Route path="/data" element={<Data token={token} />} />
+        <Route path="/" element={<Dashboard />} />
+        <Route path="/manage" element={<Manage />} />
+        <Route path="/data" element={<Data />} />
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>
     </Router>
