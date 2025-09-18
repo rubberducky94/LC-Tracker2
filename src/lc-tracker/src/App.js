@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, Navigate } from 'react-router-dom';
 import './App.css';
+import 'chart.js/auto';
+import { Bar } from 'react-chartjs-2';
 
 // Dashboard: Entry logging form
 // LocalStorage helpers (zero-dollar backend for now)
@@ -28,9 +30,17 @@ function Dashboard({ onLogout }) {
     const day = String(now.getDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
   }
-  const today = getLocalDateString();
+  // default date is today but editable
+  const [date, setDate] = useState(getLocalDateString());
   const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-  const todayDay = dayNames[new Date().getDay()];
+  const selectedDay = (() => {
+    try {
+      return dayNames[new Date(date).getDay()];
+    } catch {
+      return dayNames[new Date().getDay()];
+    }
+  })();
+
   const [period, setPeriod] = useState('');
   const [entries, setEntries] = useState({});
   const [message, setMessage] = useState('');
@@ -68,8 +78,8 @@ function Dashboard({ onLogout }) {
         if (!entry || !entry.type || !entry.zone_id || !entry.action) return;
         const obj = {
           id: `${Date.now()}-${idx}`,
-          day: todayDay,
-          date: today,
+          day: selectedDay,
+          date,
           period,
           student_id: student.id,
           type: entry.type,
@@ -104,7 +114,11 @@ function Dashboard({ onLogout }) {
       <hr />
       <form onSubmit={handleSubmit} style={{ maxWidth: '100%', margin: '0 auto', textAlign: 'left' }}>
         <div style={{ marginBottom: 16 }}>
-          <strong>Date:</strong> {today} &nbsp; <strong>Day:</strong> {todayDay}
+          <label>
+            <strong>Date:</strong>{' '}
+            <input type="date" value={date} onChange={e => setDate(e.target.value)} />
+          </label>
+          &nbsp; <strong>Day:</strong> {selectedDay}
         </div>
         <label>
           Period:
@@ -237,6 +251,66 @@ function Data() {
   // Format timestamp in user's local time zone
   const formatLocal = ts => ts ? new Date(ts).toLocaleString(undefined, { timeZoneName: 'short' }) : '';
 
+  // Export current data as JSON file
+  const handleExport = () => {
+    const payload = {
+      entries: loadJSON('lc_entries', []),
+      students: loadJSON('lc_students', []),
+      zones: loadJSON('lc_zones', []),
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `lc-export-${new Date().toISOString().slice(0,10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Import JSON file: accepts object with entries/students/zones or an array (assumed entries)
+  const handleImportFile = async (files) => {
+    const file = files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const obj = JSON.parse(text);
+      if (Array.isArray(obj)) {
+        saveJSON('lc_entries', obj);
+      } else if (obj && typeof obj === 'object') {
+        if (obj.entries) saveJSON('lc_entries', obj.entries);
+        if (obj.students) saveJSON('lc_students', obj.students);
+        if (obj.zones) saveJSON('lc_zones', obj.zones);
+      } else {
+        throw new Error('Unsupported import format');
+      }
+      // reload
+      setEntries(loadJSON('lc_entries', []));
+      setStudents(loadJSON('lc_students', []));
+      setZones(loadJSON('lc_zones', []));
+      setError('');
+    } catch (e) {
+      setError('Import failed: ' + (e.message || e));
+    }
+  };
+
+  // Build simple chart: action counts
+  const actionCounts = entries.reduce((acc, e) => {
+    if (!e || !e.action) return acc;
+    acc[e.action] = (acc[e.action] || 0) + 1;
+    return acc;
+  }, {});
+  const chartLabels = Object.keys(actionCounts);
+  const chartData = {
+    labels: chartLabels,
+    datasets: [
+      {
+        label: 'Action counts',
+        data: chartLabels.map(l => actionCounts[l]),
+        backgroundColor: 'rgba(25,118,210,0.7)',
+      },
+    ],
+  };
+
   return (
     <div>
       <h2>LC Tracker - Data Table</h2>
@@ -245,45 +319,59 @@ function Data() {
         <Link to="/manage">Manage Students/Zones</Link>
       </nav>
       <hr />
+      <div style={{ marginBottom: 12 }}>
+        <button onClick={handleExport}>Export JSON</button>{' '}
+        <label style={{ cursor: 'pointer' }}>
+          <input type="file" accept="application/json" style={{ display: 'none' }} onChange={e => handleImportFile(e.target.files)} />
+          <button type="button">Import JSON</button>
+        </label>
+      </div>
       {loading ? (
         <p>Loading...</p>
       ) : error ? (
         <p style={{ color: 'red' }}>{error}</p>
       ) : (
-        <div style={{ overflowX: 'auto' }}>
-          <table border="1" cellPadding="4" style={{ margin: '0 auto', minWidth: 900 }}>
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Day</th>
-                <th>Period</th>
-                <th>Student</th>
-                <th>Type</th>
-                <th>Zone</th>
-                <th>Zone Detail</th>
-                <th>Action</th>
-                <th>Notes</th>
-                <th>Timestamp</th>
-              </tr>
-            </thead>
-            <tbody>
-              {entries.map(e => (
-                <tr key={e.id}>
-                  <td>{e.date}</td>
-                  <td>{e.day}</td>
-                  <td>{e.period}</td>
-                  <td>{getStudentName(e.student_id)}</td>
-                  <td>{e.type}</td>
-                  <td>{getZoneName(e.zone_id)}</td>
-                  <td>{e.zone_detail}</td>
-                  <td>{e.action}</td>
-                  <td>{e.notes}</td>
-                  <td>{formatLocal(e.timestamp)}</td>
+        <>
+          {chartLabels.length > 0 && (
+            <div style={{ maxWidth: 800, marginBottom: 20 }}>
+              <Bar data={chartData} />
+            </div>
+          )}
+          <div style={{ overflowX: 'auto' }}>
+            <table border="1" cellPadding="4" style={{ margin: '0 auto', minWidth: 900 }}>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Day</th>
+                  <th>Period</th>
+                  <th>Student</th>
+                  <th>Type</th>
+                  <th>Zone</th>
+                  <th>Zone Detail</th>
+                  <th>Action</th>
+                  <th>Notes</th>
+                  <th>Timestamp</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {entries.map(e => (
+                  <tr key={e.id}>
+                    <td>{e.date}</td>
+                    <td>{e.day}</td>
+                    <td>{e.period}</td>
+                    <td>{getStudentName(e.student_id)}</td>
+                    <td>{e.type}</td>
+                    <td>{getZoneName(e.zone_id)}</td>
+                    <td>{e.zone_detail}</td>
+                    <td>{e.action}</td>
+                    <td>{e.notes}</td>
+                    <td>{formatLocal(e.timestamp)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
       )}
     </div>
   );
