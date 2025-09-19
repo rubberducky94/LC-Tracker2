@@ -44,6 +44,10 @@ function Auth() {
     e.preventDefault();
     setError('');
     try {
+      if (!auth) {
+        setError('Firebase not configured. Please set REACT_APP_FIREBASE_API_KEY in .env.local');
+        return;
+      }
       if (mode === 'login') {
         await signInWithEmailAndPassword(auth, email, password);
       } else {
@@ -58,6 +62,9 @@ function Auth() {
 
   return (
     <div style={{ maxWidth: 420, margin: '2rem auto' }}>
+      {!auth && (
+        <p style={{ color: 'orange' }}>Firebase not configured. Server sign-up/login disabled. Use "Continue without signing in" on the main page or set <code>REACT_APP_FIREBASE_API_KEY</code> in <code>.env.local</code>.</p>
+      )}
       <h3>{mode === 'login' ? 'Login' : 'Sign up'}</h3>
       <form onSubmit={handleSubmit}>
         <label>Email</label>
@@ -65,7 +72,7 @@ function Auth() {
         <label>Password</label>
         <input type="password" value={password} onChange={e => setPassword(e.target.value)} required />
         <div style={{ marginTop: 12 }}>
-          <button type="submit">{mode === 'login' ? 'Login' : 'Create account'}</button>{' '}
+          <button type="submit" disabled={!auth}>{mode === 'login' ? 'Login' : 'Create account'}</button>{' '}
           <button type="button" onClick={() => setMode(mode === 'login' ? 'signup' : 'login')}>
             {mode === 'login' ? 'Switch to Sign up' : 'Switch to Login'}
           </button>
@@ -613,15 +620,16 @@ function App() {
   const [skipAuth, setSkipAuth] = useState(false);
 
   useEffect(() => {
+    if (!auth) return; // Firebase not configured
     const unsub = onAuthStateChanged(auth, (u) => {
       setUser(u);
     });
     return () => unsub();
-  }, []);
+  }, [auth]);
 
   const handleSignOut = async () => {
     try {
-      await fbSignOut(auth);
+      if (auth) await fbSignOut(auth);
       setUser(null);
     } catch (e) {
       console.error('Sign out failed', e);
