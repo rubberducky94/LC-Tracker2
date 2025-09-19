@@ -18,6 +18,9 @@ import {
   query,
   orderBy,
   serverTimestamp,
+  updateDoc,
+  deleteDoc,
+  doc,
 } from 'firebase/firestore';
 
 // LocalStorage helpers (kept for fallback / export/import)
@@ -122,7 +125,12 @@ function Dashboard({ user }) {
           setStudents(stuSnap.docs.map(d => ({ id: d.id, ...d.data() })));
           setZones(znSnap.docs.map(d => ({ id: d.id, ...d.data() })));
         } catch (e) {
-          setError('Failed to load server data, falling back to local');
+            const msg = (e && e.message) ? e.message : String(e);
+            if (msg.includes('does not exist') || msg.includes('CONFIGURATION_NOT_FOUND') || msg.includes('database') && msg.includes('does not exist')) {
+              setError('Cloud Firestore is not configured for this project. Please create a Firestore database in the Firebase console: https://console.firebase.google.com/project/' + (process.env.REACT_APP_FIREBASE_PROJECT_ID || 'YOUR_PROJECT') + '/firestore');
+            } else {
+              setError('Failed to load server data, falling back to local: ' + msg);
+            }
           setStudents(loadJSON('lc_students', []));
           setZones(loadJSON('lc_zones', []));
         }
@@ -361,7 +369,12 @@ function Data({ user }) {
         }
         setLoading(false);
       } catch (e) {
-        setError('Failed to load data: ' + (e.message || e));
+          const msg = (e && e.message) ? e.message : String(e);
+          if (msg.includes('does not exist') || msg.includes('CONFIGURATION_NOT_FOUND')) {
+            setError('Cloud Firestore is not configured for this project. Please create a Firestore database: https://console.firebase.google.com/project/' + (process.env.REACT_APP_FIREBASE_PROJECT_ID || 'YOUR_PROJECT') + '/firestore');
+          } else {
+            setError('Failed to load data: ' + msg);
+          }
         setLoading(false);
       }
     };
@@ -501,8 +514,16 @@ function Manage({ user }) {
   const [newStudent, setNewStudent] = useState('');
   const [newZone, setNewZone] = useState('');
   const [zoneCategory, setZoneCategory] = useState('');
+  const [savingStudent, setSavingStudent] = useState(false);
+  const [savingZone, setSavingZone] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+
+  // Editing state
+  const [editingStudent, setEditingStudent] = useState(null); // { id, name }
+  const [editingZone, setEditingZone] = useState(null); // { id, name, category }
+  const [selectedStudents, setSelectedStudents] = useState(new Set());
+  const [selectedZones, setSelectedZones] = useState(new Set());
 
   useEffect(() => {
     let mounted = true;
@@ -521,7 +542,12 @@ function Manage({ user }) {
         }
         setLoading(false);
       } catch (e) {
-        setError('Failed to load: ' + (e.message || e));
+          const msg = (e && e.message) ? e.message : String(e);
+          if (msg.includes('does not exist') || msg.includes('CONFIGURATION_NOT_FOUND')) {
+            setError('Cloud Firestore is not configured for this project. Please create a Firestore database: https://console.firebase.google.com/project/' + (process.env.REACT_APP_FIREBASE_PROJECT_ID || 'YOUR_PROJECT') + '/firestore');
+          } else {
+            setError('Failed to load: ' + msg);
+          }
         setLoading(false);
       }
     };
@@ -532,10 +558,21 @@ function Manage({ user }) {
   const handleAddStudent = async (e) => {
     e.preventDefault();
     setError('');
+    if (savingStudent) return;
+    setSavingStudent(true);
     try {
       const obj = { name: newStudent };
       if (user?.uid) {
-        await addDoc(collection(db, 'users', user.uid, 'students'), obj);
+        const tempId = `tmp-${Date.now()}`;
+        const optimistic = { id: tempId, ...obj };
+        setStudents(prev => [...prev, optimistic]);
+        try {
+          const ref = await addDoc(collection(db, 'users', user.uid, 'students'), obj);
+          setStudents(prev => prev.map(s => s.id === tempId ? { id: ref.id, ...obj } : s));
+        } catch (innerErr) {
+          setStudents(prev => prev.filter(s => s.id !== tempId));
+          throw innerErr;
+        }
         const sSnap = await getDocs(query(collection(db, 'users', user.uid, 'students'), orderBy('name')));
         setStudents(sSnap.docs.map(d => ({ id: d.id, ...d.data() })));
       } else {
@@ -547,15 +584,27 @@ function Manage({ user }) {
     } catch (e) {
       setError('Save failed: ' + (e.message || e));
     }
+    setSavingStudent(false);
   };
 
   const handleAddZone = async (e) => {
     e.preventDefault();
     setError('');
+    if (savingZone) return;
+    setSavingZone(true);
     try {
       const obj = { name: newZone, category: zoneCategory };
       if (user?.uid) {
-        await addDoc(collection(db, 'users', user.uid, 'zones'), obj);
+        const tempId = `tmp-${Date.now()}`;
+        const optimistic = { id: tempId, ...obj };
+        setZones(prev => [...prev, optimistic]);
+        try {
+          const ref = await addDoc(collection(db, 'users', user.uid, 'zones'), obj);
+          setZones(prev => prev.map(z => z.id === tempId ? { id: ref.id, ...obj } : z));
+        } catch (innerErr) {
+          setZones(prev => prev.filter(z => z.id !== tempId));
+          throw innerErr;
+        }
         const zSnap = await getDocs(query(collection(db, 'users', user.uid, 'zones'), orderBy('name')));
         setZones(zSnap.docs.map(d => ({ id: d.id, ...d.data() })));
       } else {
@@ -568,6 +617,169 @@ function Manage({ user }) {
     } catch (e) {
       setError('Save failed: ' + (e.message || e));
     }
+    setSavingZone(false);
+  };
+
+  // Edit / Delete handlers
+  const startEditStudent = (s) => setEditingStudent({ id: s.id, name: s.name });
+  const cancelEditStudent = () => setEditingStudent(null);
+  const saveEditStudent = async () => {
+    if (!editingStudent) return;
+    setError('');
+    try {
+      const { id, name } = editingStudent;
+      if (user?.uid) {
+        const ref = doc(db, 'users', user.uid, 'students', id);
+        await updateDoc(ref, { name });
+        const sSnap = await getDocs(query(collection(db, 'users', user.uid, 'students'), orderBy('name')));
+        setStudents(sSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+      } else {
+        const updated = students.map(s => s.id === id ? { ...s, name } : s);
+        setStudents(updated);
+        saveJSON('lc_students', updated);
+      }
+      setEditingStudent(null);
+    } catch (e) {
+      setError('Update failed: ' + (e.message || e));
+    }
+  };
+
+  const deleteStudent = async (id) => {
+    if (!window.confirm('Delete this student? This cannot be undone.')) return;
+    setError('');
+    try {
+      if (user?.uid && !String(id).startsWith('tmp-')) {
+        await deleteDoc(doc(db, 'users', user.uid, 'students', id));
+        const sSnap = await getDocs(query(collection(db, 'users', user.uid, 'students'), orderBy('name')));
+        setStudents(sSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+      } else {
+        const filtered = students.filter(s => s.id !== id);
+        setStudents(filtered);
+        saveJSON('lc_students', filtered);
+      }
+      // also remove from selected set if present
+      setSelectedStudents(prev => {
+        const n = new Set(prev);
+        n.delete(id);
+        return n;
+      });
+    } catch (e) {
+      setError('Delete failed: ' + (e.message || e));
+    }
+  };
+
+  const startEditZone = (z) => setEditingZone({ id: z.id, name: z.name, category: z.category || '' });
+  const cancelEditZone = () => setEditingZone(null);
+  const saveEditZone = async () => {
+    if (!editingZone) return;
+    setError('');
+    try {
+      const { id, name, category } = editingZone;
+      if (user?.uid) {
+        const ref = doc(db, 'users', user.uid, 'zones', id);
+        await updateDoc(ref, { name, category });
+        const zSnap = await getDocs(query(collection(db, 'users', user.uid, 'zones'), orderBy('name')));
+        setZones(zSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+      } else {
+        const updated = zones.map(z => z.id === id ? { ...z, name, category } : z);
+        setZones(updated);
+        saveJSON('lc_zones', updated);
+      }
+      setEditingZone(null);
+    } catch (e) {
+      setError('Update failed: ' + (e.message || e));
+    }
+  };
+
+  const deleteZone = async (id) => {
+    if (!window.confirm('Delete this zone? This cannot be undone.')) return;
+    setError('');
+    try {
+      if (user?.uid && !String(id).startsWith('tmp-')) {
+        await deleteDoc(doc(db, 'users', user.uid, 'zones', id));
+        const zSnap = await getDocs(query(collection(db, 'users', user.uid, 'zones'), orderBy('name')));
+        setZones(zSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+      } else {
+        const filtered = zones.filter(z => z.id !== id);
+        setZones(filtered);
+        saveJSON('lc_zones', filtered);
+      }
+      setSelectedZones(prev => {
+        const n = new Set(prev);
+        n.delete(id);
+        return n;
+      });
+    } catch (e) {
+      setError('Delete failed: ' + (e.message || e));
+    }
+  };
+
+  // Selection helpers for bulk actions
+  const toggleStudentSelection = (id) => {
+    setSelectedStudents(prev => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
+  };
+
+  const toggleZoneSelection = (id) => {
+    setSelectedZones(prev => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
+  };
+
+  const deleteSelectedStudents = async () => {
+    if (selectedStudents.size === 0) return;
+    if (!window.confirm(`Delete ${selectedStudents.size} selected student(s)? This cannot be undone.`)) return;
+    setError('');
+    try {
+      const ids = Array.from(selectedStudents);
+      if (user?.uid) {
+        // perform deletes sequentially to reduce contention
+        for (const id of ids) {
+          if (!String(id).startsWith('tmp-')) {
+            await deleteDoc(doc(db, 'users', user.uid, 'students', id));
+          }
+        }
+        const sSnap = await getDocs(query(collection(db, 'users', user.uid, 'students'), orderBy('name')));
+        setStudents(sSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+      } else {
+        const filtered = students.filter(s => !selectedStudents.has(s.id));
+        setStudents(filtered);
+        saveJSON('lc_students', filtered);
+      }
+      setSelectedStudents(new Set());
+    } catch (e) {
+      setError('Bulk delete failed: ' + (e.message || e));
+    }
+  };
+
+  const deleteSelectedZones = async () => {
+    if (selectedZones.size === 0) return;
+    if (!window.confirm(`Delete ${selectedZones.size} selected zone(s)? This cannot be undone.`)) return;
+    setError('');
+    try {
+      const ids = Array.from(selectedZones);
+      if (user?.uid) {
+        for (const id of ids) {
+          if (!String(id).startsWith('tmp-')) {
+            await deleteDoc(doc(db, 'users', user.uid, 'zones', id));
+          }
+        }
+        const zSnap = await getDocs(query(collection(db, 'users', user.uid, 'zones'), orderBy('name')));
+        setZones(zSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+      } else {
+        const filtered = zones.filter(z => !selectedZones.has(z.id));
+        setZones(filtered);
+        saveJSON('lc_zones', filtered);
+      }
+      setSelectedZones(new Set());
+    } catch (e) {
+      setError('Bulk delete failed: ' + (e.message || e));
+    }
   };
 
   return (
@@ -578,9 +790,31 @@ function Manage({ user }) {
       </nav>
       <h3>Manage Students</h3>
       {loading ? <p>Loading...</p> : (
-        <ul>
-          {students.map(s => <li key={s.id}>{s.name}</li>)}
-        </ul>
+        <>
+          <div style={{ marginBottom: 8 }}>
+            <button onClick={deleteSelectedStudents} disabled={selectedStudents.size === 0}>Delete Selected Students ({selectedStudents.size})</button>
+          </div>
+          <ul>
+            {students.map(s => (
+              <li key={s.id} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <input type="checkbox" checked={selectedStudents.has(s.id)} onChange={() => toggleStudentSelection(s.id)} />
+                {editingStudent?.id === s.id ? (
+                  <>
+                    <input value={editingStudent.name} onChange={e => setEditingStudent(prev => ({ ...prev, name: e.target.value }))} />
+                    <button onClick={saveEditStudent}>Save</button>
+                    <button onClick={cancelEditStudent}>Cancel</button>
+                  </>
+                ) : (
+                  <>
+                    <span style={{ flex: 1 }}>{s.name}</span>
+                    <button onClick={() => startEditStudent(s)}>Edit</button>
+                    <button onClick={() => deleteStudent(s.id)}>Delete</button>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        </>
       )}
       <form onSubmit={handleAddStudent}>
         <input
@@ -589,11 +823,37 @@ function Manage({ user }) {
           value={newStudent}
           onChange={e => setNewStudent(e.target.value)}
         />
-        <button type="submit">Add Student</button>
+        <button type="submit" disabled={savingStudent}>{savingStudent ? 'Saving...' : 'Add Student'}</button>
       </form>
       <h3>Manage Zones</h3>
+      <div style={{ marginBottom: 8 }}>
+        <button onClick={deleteSelectedZones} disabled={selectedZones.size === 0}>Delete Selected Zones ({selectedZones.size})</button>
+      </div>
       <ul>
-        {zones.map(z => <li key={z.id}>{z.name} {z.category && `(${z.category})`}</li>)}
+        {zones.map(z => (
+          <li key={z.id} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input type="checkbox" checked={selectedZones.has(z.id)} onChange={() => toggleZoneSelection(z.id)} />
+            {editingZone?.id === z.id ? (
+              <>
+                <input value={editingZone.name} onChange={e => setEditingZone(prev => ({ ...prev, name: e.target.value }))} />
+                <select value={editingZone.category} onChange={e => setEditingZone(prev => ({ ...prev, category: e.target.value }))}>
+                  <option value="">Category (optional)</option>
+                  <option value="Focus">Focus</option>
+                  <option value="Semi-Collaborative">Semi-Collaborative</option>
+                  <option value="Collaborative">Collaborative</option>
+                </select>
+                <button onClick={saveEditZone}>Save</button>
+                <button onClick={cancelEditZone}>Cancel</button>
+              </>
+            ) : (
+              <>
+                <span style={{ flex: 1 }}>{z.name} {z.category && `(${z.category})`}</span>
+                <button onClick={() => startEditZone(z)}>Edit</button>
+                <button onClick={() => deleteZone(z.id)}>Delete</button>
+              </>
+            )}
+          </li>
+        ))}
       </ul>
       <form onSubmit={handleAddZone}>
         <input
@@ -602,13 +862,19 @@ function Manage({ user }) {
           value={newZone}
           onChange={e => setNewZone(e.target.value)}
         />
-        <input
-          type="text"
-          placeholder="Category (optional)"
+        <select
           value={zoneCategory}
           onChange={e => setZoneCategory(e.target.value)}
-        />
-        <button type="submit">Add Zone</button>
+          aria-label="Zone category (optional)"
+          style={{ width: '45%', padding: '0.4rem', margin: '0.2rem 0 1rem 0' }}
+        >
+          <option value="">Category (optional)</option>
+          <option value="Focus">Focus</option>
+          <option value="Semi-Collaborative">Semi-Collaborative</option>
+          <option value="Collaborative">Collaborative</option>
+        </select>
+        <br/>
+        <button type="submit" disabled={savingZone}>{savingZone ? 'Saving...' : 'Add Zone'}</button>
       </form>
       {error && <p style={{ color: 'red' }}>{error}</p>}
     </div>
