@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, Navigate } from 'react-router-dom';
 import './App.css';
 import 'chart.js/auto';
@@ -101,13 +101,12 @@ function Dashboard({ user }) {
   }
   const [date, setDate] = useState(getLocalDateString());
   const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-  const selectedDay = (() => {
-    try {
-      return dayNames[new Date(date).getDay()];
-    } catch {
-      return dayNames[new Date().getDay()];
-    }
-  })();
+  function getDayOfWeek(dateStr) {
+    const [year, month, day] = dateStr.split('-').map(Number);
+    const localDate = new Date(year, month - 1, day);
+    return dayNames[localDate.getDay()];
+  }
+  const selectedDay = getDayOfWeek(date);
   const [period, setPeriod] = useState('');
   const [entries, setEntries] = useState({});
   const [message, setMessage] = useState('');
@@ -126,7 +125,7 @@ function Dashboard({ user }) {
           setZones(znSnap.docs.map(d => ({ id: d.id, ...d.data() })));
         } catch (e) {
             const msg = (e && e.message) ? e.message : String(e);
-            if (msg.includes('does not exist') || msg.includes('CONFIGURATION_NOT_FOUND') || msg.includes('database') && msg.includes('does not exist')) {
+            if (msg.includes('does not exist') || msg.includes('CONFIGURATION_NOT_FOUND') || (msg.includes('database') && msg.includes('does not exist'))) {
               setError('Cloud Firestore is not configured for this project. Please create a Firestore database in the Firebase console: https://console.firebase.google.com/project/' + (process.env.REACT_APP_FIREBASE_PROJECT_ID || 'YOUR_PROJECT') + '/firestore');
             } else {
               setError('Failed to load server data, falling back to local: ' + msg);
@@ -144,13 +143,22 @@ function Dashboard({ user }) {
   }, [user]);
 
   const handleEntryChange = (studentId, field, value) => {
-    setEntries(prev => ({
-      ...prev,
-      [studentId]: {
-        ...prev[studentId],
-        [field]: value,
+    setEntries(prev => {
+      const next = {
+        ...prev,
+        [studentId]: {
+          ...prev[studentId],
+          [field]: value,
+        }
+      };
+      // Ensure action defaults to Self-Directed if not set
+      if (!next[studentId].action) next[studentId].action = 'Self-Directed';
+      // If type changed away from Study, clear used_study_planner
+      if (field === 'type' && value !== 'Study') {
+        next[studentId].used_study_planner = false;
       }
-    }));
+      return next;
+    });
   };
 
   const handleSubmit = async e => {
@@ -166,7 +174,10 @@ function Dashboard({ user }) {
         const promises = [];
         students.forEach((student, idx) => {
           const entry = entries[student.id];
-          if (!entry || !entry.type || !entry.zone_id || !entry.action) return;
+          if (!entry || !entry.type || !entry.zone_id) return;
+          // require action, default to Self-Directed
+          const action = entry.action || 'Self-Directed';
+          // include used_study_planner only if type === 'Study'
           const obj = {
             day: selectedDay,
             date,
@@ -174,12 +185,14 @@ function Dashboard({ user }) {
             student_id: student.id,
             type: entry.type,
             zone_id: entry.zone_id,
-            zone_detail: entry.zone_detail || '',
-            action: entry.action,
+            action,
             notes: entry.notes || '',
             createdAt: serverTimestamp(),
             client_ts: now,
           };
+          if (entry.type === 'Study') {
+            obj.used_study_planner = !!entry.used_study_planner;
+          }
           promises.push(addDoc(colRef, obj));
           added += 1;
         });
@@ -188,7 +201,8 @@ function Dashboard({ user }) {
         const saved = loadJSON('lc_entries', []);
         students.forEach((student, idx) => {
           const entry = entries[student.id];
-          if (!entry || !entry.type || !entry.zone_id || !entry.action) return;
+          if (!entry || !entry.type || !entry.zone_id) return;
+          const action = entry.action || 'Self-Directed';
           const obj = {
             id: `${Date.now()}-${idx}`,
             day: selectedDay,
@@ -197,11 +211,13 @@ function Dashboard({ user }) {
             student_id: student.id,
             type: entry.type,
             zone_id: entry.zone_id,
-            zone_detail: entry.zone_detail || '',
-            action: entry.action,
+            action,
             notes: entry.notes || '',
             timestamp: now,
           };
+          if (entry.type === 'Study') {
+            obj.used_study_planner = !!entry.used_study_planner;
+          }
           saved.push(obj);
           added += 1;
         });
@@ -212,7 +228,7 @@ function Dashboard({ user }) {
         setMessage('Entries saved!');
         setEntries({});
       } else {
-        setError('No entries were logged. Please fill out at least one student.');
+        setError('No entries were logged. Please fill out at least one student (type + zone required).');
       }
     } catch (e) {
       setError('Save failed: ' + (e.message || e));
@@ -284,13 +300,15 @@ function Dashboard({ user }) {
                 ))}
               </tr>
               <tr>
-                <td>Zone Detail</td>
+                <td>Used Study Planner?</td>
                 {students.map(s => (
                   <td key={s.id}>
                     <input
-                      type="text"
-                      value={entries[s.id]?.zone_detail || ''}
-                      onChange={e => handleEntryChange(s.id, 'zone_detail', e.target.value)}
+                      type="checkbox"
+                      checked={!!entries[s.id]?.used_study_planner}
+                      onChange={e => handleEntryChange(s.id, 'used_study_planner', e.target.checked)}
+                      disabled={(entries[s.id]?.type || '') !== 'Study'}
+                      title="Only applicable when Type is Study"
                     />
                   </td>
                 ))}
@@ -300,10 +318,9 @@ function Dashboard({ user }) {
                 {students.map(s => (
                   <td key={s.id}>
                     <select
-                      value={entries[s.id]?.action || ''}
+                      value={entries[s.id]?.action || 'Self-Directed'}
                       onChange={e => handleEntryChange(s.id, 'action', e.target.value)}
                     >
-                      <option value="">Select</option>
                       <option>Self-Directed</option>
                       <option>Coached</option>
                       <option>Redirected</option>
@@ -346,6 +363,14 @@ function Data({ user }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
+  // Filters
+  const [filterStudent, setFilterStudent] = useState('');
+  const [filterDay, setFilterDay] = useState('All');
+  const [filterPeriod, setFilterPeriod] = useState('All');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const [allTime, setAllTime] = useState(true);
+
   useEffect(() => {
     let mounted = true;
     const load = async () => {
@@ -386,88 +411,179 @@ function Data({ user }) {
   const getZoneName = id => zones.find(z => z.id === id)?.name || id;
   const formatLocal = ts => ts ? new Date(ts.seconds ? ts.toDate() : ts).toLocaleString(undefined, { timeZoneName: 'short' }) : '';
 
-  const handleExport = () => {
-    const payload = {
-      entries,
-      students,
-      zones,
-    };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  // Filtering logic
+  const filteredEntries = useMemo(() => {
+    const dayNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+    return entries.filter(e => {
+      // student
+      if (filterStudent && e.student_id !== filterStudent) return false;
+      // day of week
+      if (filterDay && filterDay !== 'All') {
+        if (!e.date) return false;
+        const d = new Date(e.date + 'T00:00:00');
+        if (dayNames[d.getDay()] !== filterDay) return false;
+      }
+      // period
+      if (filterPeriod && filterPeriod !== 'All') {
+        if (String(e.period) !== String(filterPeriod)) return false;
+      }
+      // date range (unless allTime)
+      if (!allTime) {
+        if (dateFrom) {
+          if (!e.date || e.date < dateFrom) return false;
+        }
+        if (dateTo) {
+          if (!e.date || e.date > dateTo) return false;
+        }
+      }
+      return true;
+    });
+  }, [entries, filterStudent, filterDay, filterPeriod, dateFrom, dateTo, allTime]);
+
+  // Zone usage chart
+  const zoneCounts = useMemo(() => {
+    // Start with all zones at zero so zones with 0 uses are shown
+    const acc = Object.fromEntries((zones || []).map(z => [z.id, 0]));
+    filteredEntries.forEach(e => {
+      if (!e.zone_id) return;
+      acc[e.zone_id] = (acc[e.zone_id] || 0) + 1;
+    });
+    // Preserve zone order from zones array and map to names/data
+    const labels = (zones || []).map(z => z.name || z.id);
+    const data = (zones || []).map(z => acc[z.id] || 0);
+    return { labels, data };
+  }, [filteredEntries, zones]);
+
+  // Category usage chart (include zero-count categories)
+  const categoryCounts = useMemo(() => {
+    const baseCategories = ['Focus', 'Semi-Collaborative', 'Collaborative', 'Unknown'];
+    // Initialize all base categories to zero
+    const acc = Object.fromEntries(baseCategories.map(c => [c, 0]));
+
+    const zoneById = Object.fromEntries((zones || []).map(z => [z.id, z]));
+    filteredEntries.forEach(e => {
+      const z = zoneById[e.zone_id];
+      const cat = (z && z.category) ? z.category : 'Unknown';
+      if (!acc.hasOwnProperty(cat)) {
+        // If there are custom/extra categories, include them too
+        acc[cat] = 0;
+      }
+      acc[cat] += 1;
+    });
+
+    // Keep base categories first, then any extras discovered
+    const labels = [...baseCategories, ...Object.keys(acc).filter(k => !baseCategories.includes(k))];
+    const data = labels.map(l => acc[l] || 0);
+    return { labels, data };
+  }, [filteredEntries, zones]);
+
+  const handleExportCSV = () => {
+    const rows = [
+      ['Date','Day','Period','Student','Type','Zone','Zone Category','Used Study Planner','Action','Notes','Timestamp']
+    ];
+    filteredEntries.forEach(e => {
+      const z = zones.find(z => z.id === e.zone_id);
+      rows.push([
+        e.date || '',
+        e.day || '',
+        e.period || '',
+        getStudentName(e.student_id),
+        e.type || '',
+        getZoneName(e.zone_id),
+        z?.category || '',
+        e.used_study_planner ? 'Yes' : 'No',
+        e.action || '',
+        (e.notes || '').replace(/\n/g, ' '),
+        (e.createdAt || e.timestamp || e.client_ts) ? formatLocal(e.createdAt || e.timestamp || e.client_ts) : '',
+      ]);
+    });
+    const csv = rows.map(r => r.map(c => `"${String(c).replace(/"/g,'""')}"`).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `lc-export-${new Date().toISOString().slice(0,10)}.json`;
+    a.download = `lc-entries-${new Date().toISOString().slice(0,10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
-  const handleImportFile = async (files) => {
-    const file = files?.[0];
-    if (!file) return;
-    try {
-      const text = await file.text();
-      const obj = JSON.parse(text);
-      if (Array.isArray(obj)) {
-        saveJSON('lc_entries', obj);
-      } else if (obj && typeof obj === 'object') {
-        if (obj.entries) saveJSON('lc_entries', obj.entries);
-        if (obj.students) saveJSON('lc_students', obj.students);
-        if (obj.zones) saveJSON('lc_zones', obj.zones);
-      } else {
-        throw new Error('Unsupported import format');
-      }
-      setEntries(loadJSON('lc_entries', []));
-      setStudents(loadJSON('lc_students', []));
-      setZones(loadJSON('lc_zones', []));
-      setError('');
-    } catch (e) {
-      setError('Import failed: ' + (e.message || e));
-    }
-  };
-
-  const actionCounts = entries.reduce((acc, e) => {
-    if (!e || !e.action) return acc;
-    acc[e.action] = (acc[e.action] || 0) + 1;
-    return acc;
-  }, {});
-  const chartLabels = Object.keys(actionCounts);
-  const chartData = {
-    labels: chartLabels,
-    datasets: [
-      {
-        label: 'Action counts',
-        data: chartLabels.map(l => actionCounts[l]),
-        backgroundColor: 'rgba(25,118,210,0.7)',
-      },
-    ],
-  };
-
   return (
     <div>
-      <h2>LC Tracker - Data Table</h2>
+      <h2>LC Tracker - Data Table & Charts</h2>
       <nav>
         <Link to="/">Log Entry</Link> |{' '}
         <Link to="/manage">Manage Students/Zones</Link>
       </nav>
       <hr />
-      <div style={{ marginBottom: 12 }}>
-        <button onClick={handleExport}>Export JSON</button>{' '}
-        <label style={{ cursor: 'pointer' }}>
-          <input type="file" accept="application/json" style={{ display: 'none' }} onChange={e => handleImportFile(e.target.files)} />
-          <button type="button">Import JSON</button>
-        </label>
-      </div>
       {loading ? (
         <p>Loading...</p>
       ) : error ? (
         <p style={{ color: 'red' }}>{error}</p>
       ) : (
         <>
-          {chartLabels.length > 0 && (
-            <div style={{ maxWidth: 800, marginBottom: 20 }}>
-              <Bar data={chartData} />
+          <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+            <label>
+              Student:
+              <select value={filterStudent} onChange={e => setFilterStudent(e.target.value)}>
+                <option value="">All</option>
+                {students.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            </label>
+
+            <label>
+              Day:
+              <select value={filterDay} onChange={e => setFilterDay(e.target.value)}>
+                <option>All</option>
+                {['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'].map(d => <option key={d}>{d}</option>)}
+              </select>
+            </label>
+
+            <label>
+              Period:
+              <select value={filterPeriod} onChange={e => setFilterPeriod(e.target.value)}>
+                <option>All</option>
+                {[4,5,6,7,8].map(p => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </label>
+
+            <label>
+              All time:
+              <input type="checkbox" checked={allTime} onChange={e => setAllTime(e.target.checked)} />
+            </label>
+
+            {!allTime && (
+              <>
+                <label>
+                  From: <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} />
+                </label>
+                <label>
+                  To: <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} />
+                </label>
+              </>
+            )}
+
+            <button onClick={handleExportCSV}>Export Filtered CSV</button>
+          </div>
+
+          <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+            <div style={{ maxWidth: 600, flex: 1 }}>
+              <h4>Zone Usage</h4>
+              {zoneCounts.labels.length > 0 ? (
+                <Bar data={{ labels: zoneCounts.labels, datasets: [{ label: 'Zone uses', data: zoneCounts.data, backgroundColor: 'rgba(25,118,210,0.7)' }] }} />
+              ) : <p>No data for selected filters</p>}
             </div>
-          )}
+
+            <div style={{ maxWidth: 600, flex: 1 }}>
+              <h4>Category Usage</h4>
+              {categoryCounts.labels.length > 0 ? (
+                <Bar data={{ labels: categoryCounts.labels, datasets: [{ label: 'Category uses', data: categoryCounts.data, backgroundColor: 'rgba(76,175,80,0.7)' }] }} />
+              ) : <p>No data for selected filters</p>}
+            </div>
+          </div>
+
+          <hr />
+
+          <h4>Filtered Table ({filteredEntries.length} rows)</h4>
           <div style={{ overflowX: 'auto' }}>
             <table border="1" cellPadding="4" style={{ margin: '0 auto', minWidth: 900 }}>
               <thead>
@@ -478,14 +594,15 @@ function Data({ user }) {
                   <th>Student</th>
                   <th>Type</th>
                   <th>Zone</th>
-                  <th>Zone Detail</th>
+                  <th>Zone Category</th>
+                  <th>Used Study Planner</th>
                   <th>Action</th>
                   <th>Notes</th>
                   <th>Timestamp</th>
                 </tr>
               </thead>
               <tbody>
-                {entries.map(e => (
+                {filteredEntries.map(e => (
                   <tr key={e.id}>
                     <td>{e.date}</td>
                     <td>{e.day}</td>
@@ -493,7 +610,8 @@ function Data({ user }) {
                     <td>{getStudentName(e.student_id)}</td>
                     <td>{e.type}</td>
                     <td>{getZoneName(e.zone_id)}</td>
-                    <td>{e.zone_detail}</td>
+                    <td>{zones.find(z => z.id === e.zone_id)?.category || ''}</td>
+                    <td>{e.type === 'Study' ? (e.used_study_planner ? 'Yes' : 'No') : 'N/A'}</td>
                     <td>{e.action}</td>
                     <td>{e.notes}</td>
                     <td>{formatLocal(e.createdAt || e.timestamp || e.client_ts)}</td>
@@ -936,3 +1054,4 @@ function App() {
 }
 
 export default App;
+
