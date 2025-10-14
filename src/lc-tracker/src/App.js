@@ -275,12 +275,13 @@ function Dashboard({ user }) {
                 {students.map(s => (
                   <td key={s.id}>
                     <select
-                      value={entries[s.id]?.type || ''}
+                      value={entries[s.id]?.type || 'Class'}
                       onChange={e => handleEntryChange(s.id, 'type', e.target.value)}
                     >
                       <option value="">Select</option>
                       <option value="Class">Class</option>
                       <option value="Study">Study</option>
+                      <option value="Enrichment">Enrichment</option>
                     </select>
                   </td>
                 ))}
