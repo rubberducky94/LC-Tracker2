@@ -157,6 +157,10 @@ function Dashboard({ user }) {
       if (field === 'type' && value !== 'Study') {
         next[studentId].used_study_planner = false;
       }
+      // If type changed to Enrichment, clear/disable zone selection
+      if (field === 'type' && value === 'Enrichment') {
+        next[studentId].zone_id = '';
+      }
       return next;
     });
   };
@@ -174,7 +178,9 @@ function Dashboard({ user }) {
         const promises = [];
         students.forEach((student, idx) => {
           const entry = entries[student.id];
-          if (!entry || !entry.type || !entry.zone_id) return;
+          if (!entry || !entry.type) return;
+          // zone is optional for Enrichment
+          if (entry.type !== 'Enrichment' && !entry.zone_id) return;
           // require action, default to Self-Directed
           const action = entry.action || 'Self-Directed';
           // include used_study_planner only if type === 'Study'
@@ -184,12 +190,14 @@ function Dashboard({ user }) {
             period,
             student_id: student.id,
             type: entry.type,
-            zone_id: entry.zone_id,
             action,
             notes: entry.notes || '',
             createdAt: serverTimestamp(),
             client_ts: now,
           };
+          if (entry.type !== 'Enrichment') {
+            obj.zone_id = entry.zone_id;
+          }
           if (entry.type === 'Study') {
             obj.used_study_planner = !!entry.used_study_planner;
           }
@@ -201,7 +209,8 @@ function Dashboard({ user }) {
         const saved = loadJSON('lc_entries', []);
         students.forEach((student, idx) => {
           const entry = entries[student.id];
-          if (!entry || !entry.type || !entry.zone_id) return;
+          if (!entry || !entry.type) return;
+          if (entry.type !== 'Enrichment' && !entry.zone_id) return;
           const action = entry.action || 'Self-Directed';
           const obj = {
             id: `${Date.now()}-${idx}`,
@@ -210,11 +219,13 @@ function Dashboard({ user }) {
             period,
             student_id: student.id,
             type: entry.type,
-            zone_id: entry.zone_id,
             action,
             notes: entry.notes || '',
             timestamp: now,
           };
+          if (entry.type !== 'Enrichment') {
+            obj.zone_id = entry.zone_id;
+          }
           if (entry.type === 'Study') {
             obj.used_study_planner = !!entry.used_study_planner;
           }
@@ -293,6 +304,8 @@ function Dashboard({ user }) {
                     <select
                       value={entries[s.id]?.zone_id || ''}
                       onChange={e => handleEntryChange(s.id, 'zone_id', e.target.value)}
+                      disabled={(entries[s.id]?.type || '') === 'Enrichment'}
+                      title={(entries[s.id]?.type || '') === 'Enrichment' ? 'Zone not applicable for Enrichment' : ''}
                     >
                       <option value="">Select</option>
                       {zones.map(z => <option key={z.id} value={z.id}>{z.name}</option>)}
