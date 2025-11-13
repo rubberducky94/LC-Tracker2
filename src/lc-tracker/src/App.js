@@ -161,6 +161,14 @@ function Dashboard({ user }) {
       if (field === 'type' && value === 'Enrichment') {
         next[studentId].zone_id = '';
       }
+      // If type changed to Absent, clear/disable all other inputs for that student
+      if (field === 'type' && value === 'Absent') {
+        next[studentId].zone_id = '';
+        next[studentId].used_study_planner = false;
+        next[studentId].notes = '';
+        // keep action but disable the selector in the UI; default to Self-Directed if not present
+        if (!next[studentId].action) next[studentId].action = 'Self-Directed';
+      }
       return next;
     });
   };
@@ -179,8 +187,8 @@ function Dashboard({ user }) {
         students.forEach((student, idx) => {
           const entry = entries[student.id];
           if (!entry || !entry.type) return;
-          // zone is optional for Enrichment
-          if (entry.type !== 'Enrichment' && !entry.zone_id) return;
+          // zone is optional for Enrichment and Absent
+          if (entry.type !== 'Enrichment' && entry.type !== 'Absent' && !entry.zone_id) return;
           // require action, default to Self-Directed
           const action = entry.action || 'Self-Directed';
           // include used_study_planner only if type === 'Study'
@@ -195,7 +203,7 @@ function Dashboard({ user }) {
             createdAt: serverTimestamp(),
             client_ts: now,
           };
-          if (entry.type !== 'Enrichment') {
+          if (entry.type !== 'Enrichment' && entry.type !== 'Absent') {
             obj.zone_id = entry.zone_id;
           }
           if (entry.type === 'Study') {
@@ -210,7 +218,7 @@ function Dashboard({ user }) {
         students.forEach((student, idx) => {
           const entry = entries[student.id];
           if (!entry || !entry.type) return;
-          if (entry.type !== 'Enrichment' && !entry.zone_id) return;
+          if (entry.type !== 'Enrichment' && entry.type !== 'Absent' && !entry.zone_id) return;
           const action = entry.action || 'Self-Directed';
           const obj = {
             id: `${Date.now()}-${idx}`,
@@ -223,7 +231,7 @@ function Dashboard({ user }) {
             notes: entry.notes || '',
             timestamp: now,
           };
-          if (entry.type !== 'Enrichment') {
+          if (entry.type !== 'Enrichment' && entry.type !== 'Absent') {
             obj.zone_id = entry.zone_id;
           }
           if (entry.type === 'Study') {
@@ -293,6 +301,7 @@ function Dashboard({ user }) {
                       <option value="Class">Class</option>
                       <option value="Study">Study</option>
                       <option value="Enrichment">Enrichment</option>
+                      <option value="Absent">Absent</option>
                     </select>
                   </td>
                 ))}
@@ -304,8 +313,8 @@ function Dashboard({ user }) {
                     <select
                       value={entries[s.id]?.zone_id || ''}
                       onChange={e => handleEntryChange(s.id, 'zone_id', e.target.value)}
-                      disabled={(entries[s.id]?.type || '') === 'Enrichment'}
-                      title={(entries[s.id]?.type || '') === 'Enrichment' ? 'Zone not applicable for Enrichment' : ''}
+                      disabled={(entries[s.id]?.type || '') === 'Enrichment' || (entries[s.id]?.type || '') === 'Absent'}
+                      title={(entries[s.id]?.type || '') === 'Enrichment' ? 'Zone not applicable for Enrichment' : (entries[s.id]?.type || '') === 'Absent' ? 'Zone not applicable for Absent' : ''}
                     >
                       <option value="">Select</option>
                       {zones.map(z => <option key={z.id} value={z.id}>{z.name}</option>)}
@@ -334,6 +343,7 @@ function Dashboard({ user }) {
                     <select
                       value={entries[s.id]?.action || 'Self-Directed'}
                       onChange={e => handleEntryChange(s.id, 'action', e.target.value)}
+                      disabled={(entries[s.id]?.type || '') === 'Absent'}
                     >
                       <option>Self-Directed</option>
                       <option>Coached</option>
@@ -354,6 +364,7 @@ function Dashboard({ user }) {
                       type="text"
                       value={entries[s.id]?.notes || ''}
                       onChange={e => handleEntryChange(s.id, 'notes', e.target.value)}
+                      disabled={(entries[s.id]?.type || '') === 'Absent'}
                     />
                   </td>
                 ))}
